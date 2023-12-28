@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/athena"
 	"log"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +57,26 @@ func waitForQueryToComplete(svc *athena.Athena, queryExecutionId string) error {
 	}
 }
 
+func buildQuery(interval int, year string, month string, day string, hour string) string {
+	end, _ := strconv.Atoi(hour)
+	start := end - (interval - 1)
+	return fmt.Sprintf("SELECT realmId, auctionHouseId, itemId, SUM(quantity) AS quantity, "+
+		"MIN(buyout) AS min, MAX(buyout) AS max, APPROX_PERCENTILE(buyout, 0.05) AS p05, "+
+		"APPROX_PERCENTILE(buyout, 0.1) AS p10, APPROX_PERCENTILE(buyout, 0.25) AS p25, "+
+		"APPROX_PERCENTILE(buyout, 0.5) AS p50, APPROX_PERCENTILE(buyout, 0.75) AS p75, "+
+		"APPROX_PERCENTILE(buyout, 0.9) AS p90 "+
+		"FROM sod_auctions "+
+		"WHERE year='%[1]s' AND month='%[2]s' AND day='%[3]s' AND hour BETWEEN '%[4]d' and '%[5]d' "+
+		"GROUP BY realmId, auctionHouseId, itemId", year, month, day, start, end)
+}
+
+func runAggregationQuery(svc *athena.Athena, interval int, dateInfo map[string]string) (*athena.StartQueryExecutionOutput, error) {
+	query := buildQuery(interval, dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
+	outputLocation := fmt.Sprintf("results/aggregates/interval=%[1]d/year=%[2]s/month=%[3]s/day=%[4]s/hour=%[5]s",
+		interval, dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
+	return runAthenaQuery(svc, query, outputLocation)
+}
+
 func handler(ctx context.Context, event events.S3Event) error {
 	for _, record := range event.Records {
 		key, err := url.QueryUnescape(record.S3.Object.Key)
@@ -91,21 +112,35 @@ func handler(ctx context.Context, event events.S3Event) error {
 			return fmt.Errorf("error occurred during athena query execution: %s", err)
 		}
 
-		log.Println("starting aggregate query execution..")
-		query = fmt.Sprintf(`
-			SELECT year, month, day, hour, realmId, auctionHouseId, itemId, SUM(quantity) AS quantity, 
-			MIN(buyout) AS min, MAX(buyout) AS max,
-			APPROX_PERCENTILE(buyout, 0.05) AS p05, APPROX_PERCENTILE(buyout, 0.1) AS p10,
-			APPROX_PERCENTILE(buyout, 0.25) AS p25, APPROX_PERCENTILE(buyout, 0.5) AS p50,
-			APPROX_PERCENTILE(buyout, 0.75) AS p75, APPROX_PERCENTILE(buyout, 0.9) AS p90
-			FROM sod_auctions
-			WHERE year='%[1]s' AND month='%[2]s' AND day='%[3]s' AND hour='%[4]s'
-			GROUP BY year, month, day, hour, realmId, auctionhouseId, itemId;
-		`, dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
-
-		_, err = runAthenaQuery(svc, query, "results/aggregates/")
+		log.Println("starting aggregate query execution for interval=1..")
+		_, err = runAggregationQuery(svc, 1, dateInfo)
 		if err != nil {
 			return fmt.Errorf("error occurred while running athena query: %s", err)
+		}
+
+		ahour, _ := strconv.Atoi(dateInfo["hour"])
+		if ahour == 5 || ahour == 11 || ahour == 17 || ahour == 23 {
+			log.Println("starting aggregate query execution for interval=6..")
+			_, err = runAggregationQuery(svc, 6, dateInfo)
+			if err != nil {
+				return fmt.Errorf("error occurred while running athena query: %s", err)
+			}
+		}
+
+		if ahour == 11 || ahour == 23 {
+			log.Println("starting aggregate query execution for interval=12..")
+			_, err = runAggregationQuery(svc, 12, dateInfo)
+			if err != nil {
+				return fmt.Errorf("error occurred while running athena query: %s", err)
+			}
+		}
+
+		if ahour == 23 {
+			log.Println("starting aggregate query execution for interval=24..")
+			_, err = runAggregationQuery(svc, 24, dateInfo)
+			if err != nil {
+				return fmt.Errorf("error occurred while running athena query: %s", err)
+			}
 		}
 	}
 	return nil
