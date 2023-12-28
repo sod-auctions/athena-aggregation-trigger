@@ -1,0 +1,4 @@
+.idea
+.terraform*
+bootstrap
+lambda_function.zip
