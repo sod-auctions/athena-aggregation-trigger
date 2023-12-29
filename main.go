@@ -66,7 +66,7 @@ func buildQuery(interval int, year string, month string, day string, hour string
 		"APPROX_PERCENTILE(buyout, 0.5) AS p50, APPROX_PERCENTILE(buyout, 0.75) AS p75, "+
 		"APPROX_PERCENTILE(buyout, 0.9) AS p90 "+
 		"FROM sod_auctions "+
-		"WHERE year='%[1]s' AND month='%[2]s' AND day='%[3]s' AND hour BETWEEN '%[4]d' and '%[5]d' "+
+		"WHERE year='%s' AND month='%s' AND day='%s' AND CAST(hour AS integer) BETWEEN %d and %d "+
 		"GROUP BY realmId, auctionHouseId, itemId", year, month, day, start, end)
 }
 

@@ -112,13 +112,3 @@ resource "aws_lambda_permission" "allow_s3" {
   principal     = "s3.amazonaws.com"
   source_arn    = "arn:aws:s3:::sod-auctions"
 }
-
-resource "aws_s3_bucket_notification" "bucket_notification" {
-  bucket = "sod-auctions"
-  lambda_function {
-    lambda_function_arn = aws_lambda_function.athena_aggregation_trigger.arn
-    events              = ["s3:ObjectCreated:*"]
-    filter_prefix       = "data/"
-    filter_suffix       = ".parquet"
-  }
-}
