@@ -17,6 +17,10 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 )
 
+func init() {
+	log.SetFlags(0)
+}
+
 func runAthenaQuery(svc *athena.Athena, query string, outputLocation string) (*athena.StartQueryExecutionOutput, error) {
 	input := &athena.StartQueryExecutionInput{
 		QueryString: aws.String(query),
@@ -57,23 +61,49 @@ func waitForQueryToComplete(svc *athena.Athena, queryExecutionId string) error {
 	}
 }
 
-func buildQuery(interval int, year string, month string, day string, hour string) string {
-	end, _ := strconv.Atoi(hour)
-	start := end - (interval - 1)
-	return fmt.Sprintf("SELECT realmId, auctionHouseId, itemId, SUM(quantity) AS quantity, "+
-		"MIN(buyout) AS min, MAX(buyout) AS max, APPROX_PERCENTILE(buyout, 0.05) AS p05, "+
-		"APPROX_PERCENTILE(buyout, 0.1) AS p10, APPROX_PERCENTILE(buyout, 0.25) AS p25, "+
-		"APPROX_PERCENTILE(buyout, 0.5) AS p50, APPROX_PERCENTILE(buyout, 0.75) AS p75, "+
-		"APPROX_PERCENTILE(buyout, 0.9) AS p90 "+
-		"FROM sod_auctions "+
-		"WHERE year='%s' AND month='%s' AND day='%s' AND CAST(hour AS integer) BETWEEN %d and %d "+
-		"GROUP BY realmId, auctionHouseId, itemId", year, month, day, start, end)
+func runPartitionQuery(svc *athena.Athena, tableName string, dateInfo map[string]string) error {
+	query := fmt.Sprintf("ALTER TABLE %[1]s "+
+		"ADD PARTITION (year='%[2]s', month='%[3]s', day='%[4]s', hour='%[5]s') "+
+		"LOCATION 's3://sod-auctions/data/year=%[2]s/month=%[3]s/day=%[4]s/hour=%[5]s'",
+		tableName, dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
+
+	outputLocation := "results/partitioning"
+
+	output, err := runAthenaQuery(svc, query, outputLocation)
+	if err != nil {
+		return err
+	}
+
+	return waitForQueryToComplete(svc, aws.StringValue(output.QueryExecutionId))
 }
 
 func runAggregationQuery(svc *athena.Athena, interval int, dateInfo map[string]string) (*athena.StartQueryExecutionOutput, error) {
-	query := buildQuery(interval, dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
+	end, _ := strconv.Atoi(dateInfo["hour"])
+	start := end - (interval - 1)
+
+	query := fmt.Sprintf("SELECT realmId, auctionHouseId, itemId, SUM(quantity) AS quantity, "+
+		"MIN(buyoutEach) AS min, MAX(buyoutEach) AS max, APPROX_PERCENTILE(buyoutEach, 0.05) AS p05, "+
+		"APPROX_PERCENTILE(buyoutEach, 0.1) AS p10, APPROX_PERCENTILE(buyoutEach, 0.25) AS p25, "+
+		"APPROX_PERCENTILE(buyoutEach, 0.5) AS p50, APPROX_PERCENTILE(buyoutEach, 0.75) AS p75, "+
+		"APPROX_PERCENTILE(buyoutEach, 0.9) AS p90 "+
+		"FROM sod_auctions "+
+		"WHERE year='%s' AND month='%s' AND day='%s' AND CAST(hour AS integer) BETWEEN %d and %d "+
+		"GROUP BY realmId, auctionHouseId, itemId", dateInfo["year"], dateInfo["month"], dateInfo["day"], start, end)
+
 	outputLocation := fmt.Sprintf("results/aggregates/interval=%[1]d/year=%[2]s/month=%[3]s/day=%[4]s/hour=%[5]s",
 		interval, dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
+
+	return runAthenaQuery(svc, query, outputLocation)
+}
+
+func runDistributionQuery(svc *athena.Athena, dateInfo map[string]string) (*athena.StartQueryExecutionOutput, error) {
+	query := fmt.Sprintf("SELECT realmId, auctionHouseId, itemId, buyoutEach, SUM(quantity) AS quantity "+
+		"FROM sod_auctions WHERE year='%s' AND month='%s' AND day='%s' AND hour='%s' "+
+		"GROUP BY realmId, auctionHouseId, itemId, buyoutEach",
+		dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
+
+	outputLocation := "results/price-distributions"
+
 	return runAthenaQuery(svc, query, outputLocation)
 }
 
@@ -81,7 +111,7 @@ func handler(ctx context.Context, event events.S3Event) error {
 	for _, record := range event.Records {
 		key, err := url.QueryUnescape(record.S3.Object.Key)
 		if err != nil {
-			return fmt.Errorf("error decodeding S3 object key: %v", err)
+			return fmt.Errorf("error decoding S3 object key: %v", err)
 		}
 
 		components := strings.Split(key, "/")
@@ -96,51 +126,49 @@ func handler(ctx context.Context, event events.S3Event) error {
 		sess := session.Must(session.NewSession())
 		svc := athena.New(sess)
 
-		query := fmt.Sprintf(`
-			ALTER TABLE sod_auctions ADD PARTITION (year='%[1]s', month='%[2]s', day='%[3]s', hour='%[4]s')
-    		LOCATION 's3://sod-auctions/data/year=%[1]s/month=%[2]s/day=%[3]s/hour=%[4]s';`,
-			dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
+		log.Printf("starting athena queries for file %s\n", key)
 
-		log.Printf("partitioning directory for %s", key)
-		output, err := runAthenaQuery(svc, query, "results/partitioning/")
+		log.Println("running partition query for table sod_auctions")
+		err = runPartitionQuery(svc, "sod_auctions", dateInfo)
 		if err != nil {
-			return fmt.Errorf("error occurred while running athena query: %v", err)
+			return fmt.Errorf("error occurred while running partioning query: %v", err)
 		}
 
-		err = waitForQueryToComplete(svc, aws.StringValue(output.QueryExecutionId))
-		if err != nil {
-			return fmt.Errorf("error occurred during athena query execution: %s", err)
-		}
-
-		log.Println("starting aggregate query execution for interval=1..")
+		log.Println("running aggregate query for interval=1..")
 		_, err = runAggregationQuery(svc, 1, dateInfo)
 		if err != nil {
-			return fmt.Errorf("error occurred while running athena query: %s", err)
+			return fmt.Errorf("error occurred while running distribution query: %v", err)
 		}
 
 		ahour, _ := strconv.Atoi(dateInfo["hour"])
 		if ahour == 5 || ahour == 11 || ahour == 17 || ahour == 23 {
-			log.Println("starting aggregate query execution for interval=6..")
+			log.Println("running aggregate query for interval=6..")
 			_, err = runAggregationQuery(svc, 6, dateInfo)
 			if err != nil {
-				return fmt.Errorf("error occurred while running athena query: %s", err)
+				return fmt.Errorf("error occurred while running distribution query: %v", err)
 			}
 		}
 
 		if ahour == 11 || ahour == 23 {
-			log.Println("starting aggregate query execution for interval=12..")
+			log.Println("running aggregate query for interval=12..")
 			_, err = runAggregationQuery(svc, 12, dateInfo)
 			if err != nil {
-				return fmt.Errorf("error occurred while running athena query: %s", err)
+				return fmt.Errorf("error occurred while running distribution query: %v", err)
 			}
 		}
 
 		if ahour == 23 {
-			log.Println("starting aggregate query execution for interval=24..")
+			log.Println("running aggregate query for interval=24..")
 			_, err = runAggregationQuery(svc, 24, dateInfo)
 			if err != nil {
-				return fmt.Errorf("error occurred while running athena query: %s", err)
+				return fmt.Errorf("error occurred while running distribution query: %v", err)
 			}
+		}
+
+		log.Println("running distribution query..")
+		_, err = runDistributionQuery(svc, dateInfo)
+		if err != nil {
+			return fmt.Errorf("error occurred while running distribution query: %v", err)
 		}
 	}
 	return nil
