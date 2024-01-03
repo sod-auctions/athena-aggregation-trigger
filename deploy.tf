@@ -105,10 +105,7 @@ resource "aws_lambda_function" "athena_aggregation_trigger" {
   timeout          = 60
 }
 
-resource "aws_lambda_permission" "allow_s3" {
-  statement_id  = "AllowExecutionFromS3Bucket"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.athena_aggregation_trigger.function_name
-  principal     = "s3.amazonaws.com"
-  source_arn    = "arn:aws:s3:::sod-auctions"
+resource "aws_lambda_function_event_invoke_config" "example" {
+  function_name                = aws_lambda_function.athena_aggregation_trigger.function_name
+  maximum_retry_attempts       = 0
 }

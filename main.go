@@ -81,14 +81,32 @@ func runAggregationQuery(svc *athena.Athena, interval int, dateInfo map[string]s
 	end, _ := strconv.Atoi(dateInfo["hour"])
 	start := end - (interval - 1)
 
-	query := fmt.Sprintf("SELECT realmId, auctionHouseId, itemId, SUM(quantity) AS quantity, "+
+	layout := "2006-01-02 15Z"
+	dateStr := fmt.Sprintf("%s-%s-%s %sZ", dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
+	date, err := time.Parse(layout, dateStr)
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp := date.Format(time.RFC3339)
+	year, _ := strconv.Atoi(date.Format("2006"))
+	month, _ := strconv.Atoi(date.Format("01"))
+	day, _ := strconv.Atoi(date.Format("02"))
+	hour, _ := strconv.Atoi(date.Format("15"))
+	dayOfWeek := int(date.Weekday())
+
+	query := fmt.Sprintf("SELECT '%s' AS timestamp, "+
+		"'%d' AS year, '%d' AS month, '%d' AS day, '%d' AS dayOfWeek, '%d' AS hour, "+
+		"realmId, auctionHouseId, "+
+		"itemId, SUM(quantity) AS quantity, "+
 		"MIN(buyoutEach) AS min, MAX(buyoutEach) AS max, APPROX_PERCENTILE(buyoutEach, 0.05) AS p05, "+
 		"APPROX_PERCENTILE(buyoutEach, 0.1) AS p10, APPROX_PERCENTILE(buyoutEach, 0.25) AS p25, "+
 		"APPROX_PERCENTILE(buyoutEach, 0.5) AS p50, APPROX_PERCENTILE(buyoutEach, 0.75) AS p75, "+
 		"APPROX_PERCENTILE(buyoutEach, 0.9) AS p90 "+
 		"FROM sod_auctions "+
 		"WHERE year='%s' AND month='%s' AND day='%s' AND CAST(hour AS integer) BETWEEN %d and %d "+
-		"GROUP BY realmId, auctionHouseId, itemId", dateInfo["year"], dateInfo["month"], dateInfo["day"], start, end)
+		"GROUP BY realmId, auctionHouseId, itemId", timestamp, year, month, day, dayOfWeek, hour,
+		dateInfo["year"], dateInfo["month"], dateInfo["day"], start, end)
 
 	outputLocation := fmt.Sprintf("results/aggregates/interval=%[1]d/year=%[2]s/month=%[3]s/day=%[4]s/hour=%[5]s",
 		interval, dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
