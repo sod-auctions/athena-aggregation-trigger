@@ -89,16 +89,30 @@ func runAggregationQuery(svc *athena.Athena, dateInfo map[string]string) (*athen
 
 	timestamp := date.Format(time.RFC3339)
 
-	query := fmt.Sprintf("SELECT '%s' AS timestamp, "+
-		"realmId, auctionHouseId, "+
-		"itemId, SUM(quantity) AS quantity, "+
-		"MIN(buyoutEach) AS min, MAX(buyoutEach) AS max, APPROX_PERCENTILE(buyoutEach, 0.05) AS p05, "+
-		"APPROX_PERCENTILE(buyoutEach, 0.1) AS p10, APPROX_PERCENTILE(buyoutEach, 0.25) AS p25, "+
-		"APPROX_PERCENTILE(buyoutEach, 0.5) AS p50, APPROX_PERCENTILE(buyoutEach, 0.75) AS p75, "+
-		"APPROX_PERCENTILE(buyoutEach, 0.9) AS p90 "+
-		"FROM sod_auctions "+
-		"WHERE year='%s' AND month='%s' AND day='%s' AND CAST(hour AS integer) = %d "+
-		"GROUP BY realmId, auctionHouseId, itemId", timestamp, dateInfo["year"], dateInfo["month"], dateInfo["day"], hour)
+	query := fmt.Sprintf(`
+		WITH expanded_data AS (
+ 			SELECT realmId, auctionHouseId, itemId, buyoutEach, quantity
+ 			FROM sod_auctions 
+ 			WHERE year='%s' AND month='%s' AND day='%s' AND CAST(hour AS integer) = %d
+		), 
+		expanded_with_sequence AS (
+ 			SELECT realmId, auctionHouseId, itemId, buyoutEach, 1 AS quantity
+ 			FROM expanded_data
+ 			CROSS JOIN UNNEST(SEQUENCE(1, quantity)) AS t(item_sequence)
+		)
+		SELECT '%s' AS timestamp, realmId, auctionHouseId, itemId, 
+ 			SUM(quantity) AS quantity, 
+			MIN(buyoutEach) AS min,
+			MAX(buyoutEach) AS max,
+			APPROX_PERCENTILE(buyoutEach, 0.05) AS p05,
+			APPROX_PERCENTILE(buyoutEach, 0.1) AS p10,
+			APPROX_PERCENTILE(buyoutEach, 0.25) AS p25,
+			APPROX_PERCENTILE(buyoutEach, 0.5) AS p50,
+			APPROX_PERCENTILE(buyoutEach, 0.75) AS p75,
+			APPROX_PERCENTILE(buyoutEach, 0.9) AS p90 
+		FROM expanded_with_sequence 
+		GROUP BY realmId, auctionHouseId, itemId
+	`, dateInfo["year"], dateInfo["month"], dateInfo["day"], hour, timestamp)
 
 	outputLocation := fmt.Sprintf("results/aggregates/interval=1/year=%s/month=%s/day=%s/hour=%s",
 		dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
