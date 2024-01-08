@@ -61,7 +61,7 @@ func waitForQueryToComplete(svc *athena.Athena, queryExecutionId string) error {
 	}
 }
 
-func runPartitionQuery(svc *athena.Athena, dateInfo map[string]string) error {
+func runDataPartitionQuery(svc *athena.Athena, dateInfo map[string]string) error {
 	query := fmt.Sprintf("ALTER TABLE sod_auctions "+
 		"ADD PARTITION (year='%[1]s', month='%[2]s', day='%[3]s', hour='%[4]s') "+
 		"LOCATION 's3://sod-auctions/data/year=%[1]s/month=%[2]s/day=%[3]s/hour=%[4]s'",
@@ -77,14 +77,14 @@ func runPartitionQuery(svc *athena.Athena, dateInfo map[string]string) error {
 	return waitForQueryToComplete(svc, aws.StringValue(output.QueryExecutionId))
 }
 
-func runAggregationQuery(svc *athena.Athena, dateInfo map[string]string) (*athena.StartQueryExecutionOutput, error) {
+func runAggregationQuery(svc *athena.Athena, dateInfo map[string]string) error {
 	hour, _ := strconv.Atoi(dateInfo["hour"])
 
 	layout := "2006-01-02 15Z"
 	dateStr := fmt.Sprintf("%s-%s-%s %sZ", dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
 	date, err := time.Parse(layout, dateStr)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	timestamp := date.Format(time.RFC3339)
@@ -117,7 +117,29 @@ func runAggregationQuery(svc *athena.Athena, dateInfo map[string]string) (*athen
 	outputLocation := fmt.Sprintf("results/aggregates/interval=1/year=%s/month=%s/day=%s/hour=%s",
 		dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
 
-	return runAthenaQuery(svc, query, outputLocation)
+	output, err := runAthenaQuery(svc, query, outputLocation)
+	if err != nil {
+		return err
+	}
+
+	return waitForQueryToComplete(svc, aws.StringValue(output.QueryExecutionId))
+}
+
+func runAggregationPartitionQuery(svc *athena.Athena, dateInfo map[string]string) error {
+	query := fmt.Sprintf(`
+		ALTER TABLE aggregate_results
+		ADD PARTITION (year='%[1]s', month='%[2]s', day='%[3]s', hour='%[4]s')
+		LOCATION 's3://sod-auctions/results/aggregates/interval=1/year=%[1]s/month=%[2]s/day=%[3]s/hour=%[4]s'
+	`, dateInfo["year"], dateInfo["month"], dateInfo["day"], dateInfo["hour"])
+
+	outputLocation := "results/partitioning"
+
+	output, err := runAthenaQuery(svc, query, outputLocation)
+	if err != nil {
+		return err
+	}
+
+	return waitForQueryToComplete(svc, aws.StringValue(output.QueryExecutionId))
 }
 
 func runDistributionQuery(svc *athena.Athena, dateInfo map[string]string) (*athena.StartQueryExecutionOutput, error) {
@@ -152,14 +174,20 @@ func handler(ctx context.Context, event events.S3Event) error {
 
 		log.Printf("starting athena queries for file %s\n", key)
 
-		log.Println("running partition query...")
-		err = runPartitionQuery(svc, dateInfo)
+		log.Println("running data partition query...")
+		err = runDataPartitionQuery(svc, dateInfo)
 		if err != nil {
 			return fmt.Errorf("error occurred while running partioning query: %v", err)
 		}
 
 		log.Println("running aggregate query...")
-		_, err = runAggregationQuery(svc, dateInfo)
+		err = runAggregationQuery(svc, dateInfo)
+		if err != nil {
+			return fmt.Errorf("error occurred while running distribution query: %v", err)
+		}
+
+		log.Println("running aggregate partition query...")
+		err = runAggregationPartitionQuery(svc, dateInfo)
 		if err != nil {
 			return fmt.Errorf("error occurred while running distribution query: %v", err)
 		}
